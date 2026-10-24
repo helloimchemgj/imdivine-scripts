@@ -1,0 +1,1357 @@
+-- [[ imdivine Silent Aim & Camlock Script - divine.all-in-one ]]
+local UIS = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local lp = Players.LocalPlayer
+local cam = workspace.CurrentCamera
+local mouse = lp:GetMouse()
+
+local cfg = {
+silentAim = true,
+useKeybind = true,
+silentAimKey = Enum.KeyCode.V,
+uiToggleKey = Enum.KeyCode.RightControl,
+silentAimHitChance = 100,
+silentAimFOV = 150,
+silentAimFOVShow = true,
+silentAimFOVFilled = false,
+silentAimFOVOpacity = 0.3,
+silentAimFOVColor = Color3.fromRGB(0, 150, 255),
+
+-- Camlock Settings
+camlockMode = false,
+hardCamlock = false,
+camlockKey = Enum.KeyCode.C,
+camlockSmoothness = 5,
+camlockPrediction = 0.12,
+camlockWallCheck = true,
+camlockSelectedPlayer = nil,
+
+-- ESP Settings
+usernameESP = false,
+highlightESP = false,
+espTextColor = Color3.fromRGB(0, 130, 240),
+
+-- Hitbox Expander Settings
+hitboxExpander = false,
+hitboxScale = 3,
+hitboxTransparency = 0.7,
+hitboxColor = Color3.fromRGB(0, 130, 240),
+
+-- Extra & Fog Settings
+noFog = false,
+fogDistance = 2000,
+fogColorCustom = Color3.fromRGB(255, 255, 255),
+fogRainbow = false,
+zoomRate = 1,
+
+silentAimPart = "Head",
+silentAimClosestPart = false,
+
+silentAimTeamCheck = false,
+silentAimWallCheck = false,
+silentAimMaxDist = 1000,
+
+silentAimPredX = 0,
+silentAimPredY = 0,
+silentAimPredZ = 0,
+
+bypassRevolver = false,
+}
+
+local bodyPartsList = {
+"Head", "UpperTorso", "HumanoidRootPart", "LowerTorso",
+"LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm",
+"LeftHand", "RightHand", "LeftUpperLeg", "RightUpperLeg",
+"LeftLowerLeg", "RightLowerLeg", "LeftFoot", "RightFoot"
+}
+
+-- FOV Circle Drawing Setup
+local fovCircle = Drawing.new("Circle")
+fovCircle.Thickness = 1.5
+fovCircle.NumSides = 64
+fovCircle.Radius = cfg.silentAimFOV
+fovCircle.Color = cfg.silentAimFOVColor
+fovCircle.Filled = cfg.silentAimFOVFilled
+fovCircle.Visible = cfg.silentAimFOVShow
+fovCircle.Transparency = cfg.silentAimFOVOpacity
+
+local silentAimCachedPart = nil
+local camlockTarget = nil
+local espBillboards = {}
+local espHighlights = {}
+local originalHitboxSizes = {}
+local originalHitboxTransparencies = {}
+local originalHitboxColors = {}
+local scriptRunning = true
+
+local function isHoldingRevolver()
+if not cfg.bypassRevolver then return false end
+local char = lp.Character
+if not char then return false end
+
+local tool = char:FindFirstChildOfClass("Tool")
+if tool then
+local toolName = string.lower(tool.Name)
+if string.find(toolName, "revolver") or string.find(toolName, "rev") then
+return true
+end
+end
+return false
+end
+
+local function getHum(p)
+local c = p and p.Character
+return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function getHRP(p)
+local c = p and p.Character
+return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function isAlive(p)
+local h = getHum(p)
+return h and h.Health > 0
+end
+
+local function sameTeam(p)
+return lp.Team and p.Team and lp.Team == p.Team
+end
+
+local function wallBetween(pos)
+local ro = cam.CFrame.Position
+local rd = pos - ro
+local params = RaycastParams.new()
+params.FilterDescendantsInstances = {lp.Character}
+params.FilterType = Enum.RaycastFilterType.Exclude
+local hit = workspace:Raycast(ro, rd, params)
+if not hit then return false end
+for _, p in pairs(Players:GetPlayers()) do
+if p.Character and hit.Instance:IsDescendantOf(p.Character) then return false end
+end
+return true
+end
+
+local function safeWorldToViewportPoint(pos)
+local sp, on = Vector3.new(), false
+pcall(function()
+sp, on = cam:WorldToViewportPoint(pos)
+end)
+return sp, on
+end
+
+local function getClosestBodyPart(char)
+local closestPart, shortestDist = nil, math.huge
+local mousePos = UIS:GetMouseLocation()
+for _, pName in ipairs(bodyPartsList) do
+local part = char:FindFirstChild(pName)
+if part then
+local screenPos, onScreen = safeWorldToViewportPoint(part.Position)
+local dist = onScreen and (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude or math.huge
+if dist < shortestDist then
+shortestDist = dist
+closestPart = part
+end
+end
+end
+return closestPart or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getTargetPart(char)
+if not char then return nil end
+if cfg.silentAimClosestPart then
+return getClosestBodyPart(char)
+end
+return char:FindFirstChild(cfg.silentAimPart) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getClosestPlayerToCursor()
+if isHoldingRevolver() then return nil end
+
+local closestPlayer = nil
+local shortestDist = cfg.silentAimFOV
+local mousePos = UIS:GetMouseLocation()
+
+for _, p in pairs(Players:GetPlayers()) do
+if p ~= lp and isAlive(p) then
+if cfg.silentAimTeamCheck and sameTeam(p) then continue end
+local hrp = getHRP(p)
+if hrp then
+local dist3D = (hrp.Position - cam.CFrame.Position).Magnitude
+if dist3D <= cfg.silentAimMaxDist then
+local sp, onScreen = safeWorldToViewportPoint(hrp.Position)
+if onScreen then
+local dist2D = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+if dist2D < shortestDist then
+local part = getTargetPart(p.Character)
+if part then
+if not cfg.silentAimWallCheck or not wallBetween(part.Position) then
+shortestDist = dist2D
+closestPlayer = part
+end
+end
+end
+end
+end
+end
+end
+end
+return closestPlayer
+end
+
+local function getClosestPlayerForCamlock()
+local closestPart = nil
+local shortestDist = math.huge
+local mousePos = UIS:GetMouseLocation()
+
+for _, p in pairs(Players:GetPlayers()) do
+if p ~= lp and isAlive(p) then
+local hrp = getHRP(p)
+if hrp then
+local sp, onScreen = safeWorldToViewportPoint(hrp.Position)
+if onScreen then
+local dist2D = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+if dist2D < shortestDist then
+local part = getTargetPart(p.Character)
+if part then
+shortestDist = dist2D
+closestPart = part
+end
+end
+end
+end
+end
+end
+return closestPart
+end
+
+-- ==================== UI SETUP ====================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "divineAllInOneUI"
+screenGui.ResetOnSpawn = false
+screenGui.DisplayOrder = 999999
+
+local success = pcall(function()
+screenGui.Parent = CoreGui
+end)
+if not success or not screenGui.Parent then
+screenGui.Parent = lp:WaitForChild("PlayerGui")
+end
+
+-- Notification Holder
+local notifHolder = Instance.new("Frame")
+notifHolder.Name = "NotificationHolder"
+notifHolder.Size = UDim2.new(0, 240, 1, 0)
+notifHolder.Position = UDim2.new(1, -260, 0, 0)
+notifHolder.BackgroundTransparency = 1
+notifHolder.Parent = screenGui
+
+local notifLayout = Instance.new("UIListLayout")
+notifLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+notifLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+notifLayout.SortOrder = Enum.SortOrder.LayoutOrder
+notifLayout.Padding = UDim.new(0, 8)
+notifLayout.Parent = notifHolder
+
+local function sendNotification(title, state)
+local notifBox = Instance.new("Frame")
+notifBox.Size = UDim2.new(0, 240, 0, 48)
+notifBox.Position = UDim2.new(1, 50, 0, 0)
+notifBox.BackgroundColor3 = Color3.fromRGB(246, 249, 252)
+notifBox.BorderSizePixel = 0
+notifBox.Parent = notifHolder
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(200, 215, 235)
+stroke.Thickness = 1
+stroke.Parent = notifBox
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -12, 0, 20)
+titleLabel.Position = UDim2.new(0, 12, 0, 4)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Font = Enum.Font.Code
+titleLabel.Text = title
+titleLabel.TextColor3 = Color3.fromRGB(40, 120, 200)
+titleLabel.TextSize = 12
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = notifBox
+
+local stateLabel = Instance.new("TextLabel")
+stateLabel.Size = UDim2.new(1, -12, 0, 18)
+stateLabel.Position = UDim2.new(0, 12, 0, 22)
+stateLabel.BackgroundTransparency = 1
+stateLabel.Font = Enum.Font.Code
+stateLabel.Text = type(state) == "boolean" and (state and "STATUS: <font color=\"#00A859\">ENABLED</font>" or "STATUS: <font color=\"#E53935\">DISABLED</font>") or ("TARGET: <font color=\"#0090FF\">" .. tostring(state) .. "</font>")
+stateLabel.RichText = true
+stateLabel.TextColor3 = Color3.fromRGB(90, 100, 115)
+stateLabel.TextSize = 10
+stateLabel.TextXAlignment = Enum.TextXAlignment.Left
+stateLabel.Parent = notifBox
+
+local tweenIn = TweenService:Create(notifBox, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Position = UDim2.new(0, 0, 0, 0)})
+tweenIn:Play()
+
+task.spawn(function()
+task.wait(2.5)
+local tweenOut = TweenService:Create(notifBox, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Position = UDim2.new(1, 50, 0, 0)})
+tweenOut:Play()
+tweenOut.Completed:Wait()
+notifBox:Destroy()
+end)
+end
+
+-- ADVANCED FOG CHANGER LOGIC
+local storedEffects = {}
+local function updateFog()
+if cfg.noFog then
+Lighting.FogEnd = 9e9
+Lighting.FogStart = 9e9
+Lighting.GlobalShadows = false
+for _, obj in ipairs(Lighting:GetChildren()) do
+if obj:IsA("Atmosphere") or obj:IsA("BlurEffect") or obj:IsA("DepthOfFieldEffect") or obj:IsA("SunRaysEffect") then
+if not storedEffects[obj] then storedEffects[obj] = obj.Parent end
+obj.Parent = nil
+end
+end
+else
+Lighting.FogEnd = cfg.fogDistance
+Lighting.FogStart = 0
+if not cfg.fogRainbow then
+Lighting.FogColor = cfg.fogColorCustom
+end
+Lighting.GlobalShadows = true
+for obj, originalParent in pairs(storedEffects) do
+if obj and originalParent then obj.Parent = originalParent end
+end
+storedEffects = {}
+end
+end
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 500, 0, 500)
+mainFrame.Position = UDim2.new(0.5, -250, 0.5, -250)
+mainFrame.BackgroundColor3 = Color3.fromRGB(242, 246, 250)
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = screenGui
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(200, 215, 235)
+stroke.Thickness = 1.5
+stroke.Parent = mainFrame
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -50, 0, 26)
+titleLabel.Position = UDim2.new(0, 12, 0, 6)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Font = Enum.Font.Code
+titleLabel.Text = "DIVINE.ALL-IN-ONE"
+titleLabel.TextColor3 = Color3.fromRGB(40, 60, 85)
+titleLabel.TextSize = 13
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = mainFrame
+
+local creditLabel = Instance.new("TextLabel")
+creditLabel.Size = UDim2.new(1, -50, 0, 16)
+creditLabel.Position = UDim2.new(0, 12, 0, 28)
+creditLabel.BackgroundTransparency = 1
+creditLabel.Font = Enum.Font.Code
+creditLabel.Text = "dev: .imdivine"
+creditLabel.TextColor3 = Color3.fromRGB(110, 130, 155)
+creditLabel.TextSize = 10
+creditLabel.TextXAlignment = Enum.TextXAlignment.Left
+creditLabel.Parent = mainFrame
+
+local minimizeBtn = Instance.new("TextButton")
+minimizeBtn.Size = UDim2.new(0, 24, 0, 24)
+minimizeBtn.Position = UDim2.new(1, -32, 0, 8)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(235, 241, 248)
+minimizeBtn.Font = Enum.Font.Code
+minimizeBtn.Text = "-"
+minimizeBtn.TextColor3 = Color3.fromRGB(40, 60, 85)
+minimizeBtn.TextSize = 14
+minimizeBtn.ZIndex = 5
+minimizeBtn.Parent = mainFrame
+
+local minStroke = Instance.new("UIStroke")
+minStroke.Color = Color3.fromRGB(200, 215, 235)
+minStroke.Thickness = 1
+minStroke.Parent = minimizeBtn
+
+-- Sidebar Navigation Frame
+local tabNavFrame = Instance.new("Frame")
+tabNavFrame.Size = UDim2.new(0, 110, 1, -60)
+tabNavFrame.Position = UDim2.new(0, 12, 0, 48)
+tabNavFrame.BackgroundColor3 = Color3.fromRGB(236, 241, 247)
+tabNavFrame.BorderSizePixel = 0
+tabNavFrame.Parent = mainFrame
+
+local tabStroke = Instance.new("UIStroke")
+tabStroke.Color = Color3.fromRGB(200, 215, 235)
+tabStroke.Thickness = 1
+tabStroke.Parent = tabNavFrame
+
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.FillDirection = Enum.FillDirection.Vertical
+tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tabLayout.Padding = UDim.new(0, 4)
+tabLayout.Parent = tabNavFrame
+
+-- Sections Container Frame
+local sectionsContainer = Instance.new("Frame")
+sectionsContainer.Name = "SectionsContainer"
+sectionsContainer.Size = UDim2.new(1, -136, 1, -60)
+sectionsContainer.Position = UDim2.new(0, 130, 0, 48)
+sectionsContainer.BackgroundTransparency = 1
+sectionsContainer.ClipsDescendants = true
+sectionsContainer.Parent = mainFrame
+
+local sections = {}
+
+local function createSectionFrame(name)
+local sf = Instance.new("ScrollingFrame")
+sf.Name = name .. "Section"
+sf.Size = UDim2.new(1, 0, 1, 0)
+sf.Position = UDim2.new(0.08, 0, 0, 0)
+sf.BackgroundTransparency = 1
+sf.BorderSizePixel = 0
+sf.CanvasSize = UDim2.new(0, 0, 0, 1100)
+sf.ScrollBarThickness = 2
+sf.ScrollBarImageColor3 = Color3.fromRGB(150, 185, 225)
+sf.Visible = false
+sf.Parent = sectionsContainer
+
+local list = Instance.new("UIListLayout")
+list.HorizontalAlignment = Enum.HorizontalAlignment.Center
+list.SortOrder = Enum.SortOrder.LayoutOrder
+list.Padding = UDim.new(0, 6)
+list.Parent = sf
+
+sections[name] = sf
+return sf
+end
+
+local function createButton(parent, name, defaultText, callback)
+local btn = Instance.new("TextButton")
+btn.Size = UDim2.new(1, 0, 0, 32)
+btn.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+btn.BorderSizePixel = 0
+btn.AutoButtonColor = true
+btn.Font = Enum.Font.Code
+btn.Text = " " .. name .. ": " .. defaultText
+btn.TextColor3 = Color3.fromRGB(50, 70, 95)
+btn.TextSize = 11
+btn.TextXAlignment = Enum.TextXAlignment.Left
+btn.ZIndex = 2
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(210, 225, 242)
+stroke.Thickness = 1
+stroke.Parent = btn
+
+btn.MouseButton1Down:Connect(callback)
+btn.Parent = parent
+return btn
+end
+
+local function createSlider(parent, name, minVal, maxVal, currentVal, callback)
+local wrapper = Instance.new("Frame")
+wrapper.Size = UDim2.new(1, 0, 0, 42)
+wrapper.BackgroundTransparency = 1
+wrapper.ZIndex = 2
+
+local label = Instance.new("TextLabel")
+label.Size = UDim2.new(1, 0, 0, 18)
+label.BackgroundTransparency = 1
+label.Font = Enum.Font.Code
+label.Text = " " .. name .. ": " .. tostring(currentVal)
+label.TextColor3 = Color3.fromRGB(80, 95, 115)
+label.TextSize = 11
+label.TextXAlignment = Enum.TextXAlignment.Left
+label.ZIndex = 2
+label.Parent = wrapper
+
+local sliderBar = Instance.new("TextButton")
+sliderBar.AutoButtonColor = false
+sliderBar.Text = ""
+sliderBar.Size = UDim2.new(1, 0, 0, 8)
+sliderBar.Position = UDim2.new(0, 0, 0, 22)
+sliderBar.BackgroundColor3 = Color3.fromRGB(235, 241, 248)
+sliderBar.BorderSizePixel = 0
+sliderBar.ZIndex = 2
+sliderBar.Parent = wrapper
+
+local barStroke = Instance.new("UIStroke")
+barStroke.Color = Color3.fromRGB(210, 225, 242)
+barStroke.Thickness = 1
+barStroke.Parent = sliderBar
+
+local fillBar = Instance.new("Frame")
+local initialRatio = (currentVal - minVal) / (maxVal - minVal)
+fillBar.Size = UDim2.new(initialRatio, 0, 1, 0)
+fillBar.BackgroundColor3 = Color3.fromRGB(50, 150, 245)
+fillBar.BorderSizePixel = 0
+fillBar.ZIndex = 3
+fillBar.Parent = sliderBar
+
+local sliderThumb = Instance.new("Frame")
+sliderThumb.Size = UDim2.new(0, 8, 0, 14)
+sliderThumb.AnchorPoint = Vector2.new(0.5, 0.5)
+sliderThumb.Position = UDim2.new(initialRatio, 0, 0.5, 0)
+sliderThumb.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+sliderThumb.BorderSizePixel = 0
+sliderThumb.ZIndex = 4
+sliderThumb.Parent = sliderBar
+
+local thumbStroke = Instance.new("UIStroke")
+thumbStroke.Color = Color3.fromRGB(180, 205, 235)
+thumbStroke.Thickness = 1
+thumbStroke.Parent = sliderThumb
+
+local dragging = false
+
+local function updateSlider(input)
+local mousePos = input.Position.X
+local barPos = sliderBar.AbsolutePosition.X
+local barSize = sliderBar.AbsoluteSize.X
+local posRatio = math.clamp((mousePos - barPos) / barSize, 0, 1)
+
+local newVal = minVal + (maxVal - minVal) * posRatio
+if maxVal > 1 and maxVal ~= 0.3 and maxVal ~= 0.5 then
+newVal = math.floor(newVal)
+else
+newVal = tonumber(string.format("%.2f", newVal))
+end
+
+fillBar.Size = UDim2.new(posRatio, 0, 1, 0)
+sliderThumb.Position = UDim2.new(posRatio, 0, 0.5, 0)
+label.Text = " " .. name .. ": " .. tostring(newVal)
+callback(newVal)
+end
+
+sliderBar.InputBegan:Connect(function(input)
+if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+dragging = true
+updateSlider(input)
+end
+end)
+
+UIS.InputEnded:Connect(function(input)
+if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+dragging = false
+end
+end)
+
+UIS.InputChanged:Connect(function(input)
+if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+updateSlider(input)
+end
+end)
+
+wrapper.Parent = parent
+end
+
+-- Create Individual Section Frames
+local homeSec = createSectionFrame("Home")
+local silentAimSec = createSectionFrame("SilentAim")
+local camlockSec = createSectionFrame("Camlock")
+local espSec = createSectionFrame("ESP")
+local hbeSec = createSectionFrame("HBE")
+local fogSec = createSectionFrame("Fog")
+local extraSec = createSectionFrame("Extra")
+
+-- Populate Home Section
+local welcomeCard = Instance.new("Frame")
+welcomeCard.Size = UDim2.new(1, 0, 0, 75)
+welcomeCard.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+welcomeCard.BorderSizePixel = 0
+welcomeCard.Parent = homeSec
+
+local wcStroke = Instance.new("UIStroke")
+wcStroke.Color = Color3.fromRGB(210, 225, 242)
+wcStroke.Thickness = 1
+wcStroke.Parent = welcomeCard
+
+local welcomeText = Instance.new("TextLabel")
+welcomeText.Size = UDim2.new(1, -16, 1, 0)
+welcomeText.Position = UDim2.new(0, 8, 0, 0)
+welcomeText.BackgroundTransparency = 1
+welcomeText.Font = Enum.Font.Code
+welcomeText.Text = "LOGGED IN: " .. lp.Name .. "\n<font size='10' color='#8098B5'>SELECT A CATEGORY ON LEFT</font>"
+welcomeText.RichText = true
+welcomeText.TextColor3 = Color3.fromRGB(40, 60, 85)
+welcomeText.TextSize = 11
+welcomeText.TextXAlignment = Enum.TextXAlignment.Left
+welcomeText.TextYAlignment = Enum.TextYAlignment.Center
+welcomeText.Parent = welcomeCard
+
+local infoCard = Instance.new("Frame")
+infoCard.Size = UDim2.new(1, 0, 0, 95)
+infoCard.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+infoCard.BorderSizePixel = 0
+infoCard.Parent = homeSec
+
+local icStroke = Instance.new("UIStroke")
+icStroke.Color = Color3.fromRGB(210, 225, 242)
+icStroke.Thickness = 1
+icStroke.Parent = infoCard
+
+local infoText = Instance.new("TextLabel")
+infoText.Size = UDim2.new(1, -16, 1, 0)
+infoText.Position = UDim2.new(0, 8, 0, 0)
+infoText.BackgroundTransparency = 1
+infoText.Font = Enum.Font.Code
+infoText.Text = "KEYBINDS:\n• UI TOGGLE: RIGHT CONTROL\n• SILENT AIM: V\n• CAMLOCK: C"
+infoText.TextColor3 = Color3.fromRGB(80, 95, 115)
+infoText.TextSize = 10
+infoText.TextXAlignment = Enum.TextXAlignment.Left
+infoText.Parent = infoCard
+
+-- Populate Silent Aim Section
+local silentAimToggleBtn
+silentAimToggleBtn = createButton(silentAimSec, "Silent Aim Mode", cfg.silentAim and "ENABLED" or "DISABLED", function()
+cfg.silentAim = not cfg.silentAim
+silentAimToggleBtn.Text = " Silent Aim Mode: " .. (cfg.silentAim and "ENABLED" or "DISABLED")
+sendNotification("Silent Aim Mode", cfg.silentAim)
+end)
+
+local fovToggleBtn
+fovToggleBtn = createButton(silentAimSec, "FOV Circle", cfg.silentAimFOVShow and "ENABLED" or "DISABLED", function()
+cfg.silentAimFOVShow = not cfg.silentAimFOVShow
+fovToggleBtn.Text = " FOV Circle: " .. (cfg.silentAimFOVShow and "ENABLED" or "DISABLED")
+sendNotification("FOV Circle", cfg.silentAimFOVShow)
+end)
+
+-- FOV Color Cycler
+local fovColors = {
+{Name = "Cyan", Color = Color3.fromRGB(0, 150, 255)},
+{Name = "White", Color = Color3.fromRGB(255, 255, 255)},
+{Name = "Green", Color = Color3.fromRGB(0, 255, 100)},
+{Name = "Yellow", Color = Color3.fromRGB(255, 220, 0)},
+{Name = "Red", Color = Color3.fromRGB(255, 50, 50)},
+{Name = "Pink", Color = Color3.fromRGB(255, 105, 180)},
+{Name = "Purple", Color = Color3.fromRGB(160, 32, 240)}
+}
+local fovColorIndex = 1
+
+local fovColorBtn
+fovColorBtn = createButton(silentAimSec, "FOV Color", fovColors[fovColorIndex].Name, function()
+fovColorIndex = fovColorIndex + 1
+if fovColorIndex > #fovColors then
+fovColorIndex = 1
+end
+local selected = fovColors[fovColorIndex]
+cfg.silentAimFOVColor = selected.Color
+fovCircle.Color = selected.Color
+fovColorBtn.Text = " FOV Color: " .. selected.Name
+sendNotification("FOV Color", selected.Name)
+end)
+
+createSlider(silentAimSec, "FOV Radius", 10, 500, cfg.silentAimFOV, function(val)
+cfg.silentAimFOV = val
+fovCircle.Radius = cfg.silentAimFOV
+end)
+
+createSlider(silentAimSec, "Transparency", 0, 1, cfg.silentAimFOVOpacity, function(val)
+cfg.silentAimFOVOpacity = val
+fovCircle.Transparency = cfg.silentAimFOVOpacity
+end)
+
+-- Populate Camlock Section
+local camlockToggleBtn
+camlockToggleBtn = createButton(camlockSec, "Camlock Mode", cfg.camlockMode and "ENABLED" or "DISABLED", function()
+cfg.camlockMode = not cfg.camlockMode
+camlockToggleBtn.Text = " Camlock Mode: " .. (cfg.camlockMode and "ENABLED" or "DISABLED")
+if not cfg.camlockMode then
+camlockTarget = nil
+end
+sendNotification("Camlock Mode", cfg.camlockMode)
+end)
+
+local hardCamlockToggleBtn
+hardCamlockToggleBtn = createButton(camlockSec, "Hard Camlock", cfg.hardCamlock and "ENABLED" or "DISABLED", function()
+cfg.hardCamlock = not cfg.hardCamlock
+hardCamlockToggleBtn.Text = " Hard Camlock: " .. (cfg.hardCamlock and "ENABLED" or "DISABLED")
+sendNotification("Hard Camlock", cfg.hardCamlock)
+end)
+
+local camlockWallCheckBtn
+camlockWallCheckBtn = createButton(camlockSec, "Camlock WallCheck", cfg.camlockWallCheck and "ENABLED" or "DISABLED", function()
+cfg.camlockWallCheck = not cfg.camlockWallCheck
+camlockWallCheckBtn.Text = " Camlock WallCheck: " .. (cfg.camlockWallCheck and "ENABLED" or "DISABLED")
+sendNotification("Camlock WallCheck", cfg.camlockWallCheck)
+end)
+
+createSlider(camlockSec, "Camlock Smoothness", 1, 20, cfg.camlockSmoothness, function(val)
+cfg.camlockSmoothness = val
+end)
+
+createSlider(camlockSec, "Prediction Scale", 0, 0.3, cfg.camlockPrediction, function(val)
+cfg.camlockPrediction = val
+end)
+
+-- Player List Section for Camlock
+local playerListHeader = Instance.new("TextLabel")
+playerListHeader.Size = UDim2.new(1, 0, 0, 20)
+playerListHeader.BackgroundTransparency = 1
+playerListHeader.Font = Enum.Font.Code
+playerListHeader.Text = " TARGET SELECTOR"
+playerListHeader.TextColor3 = Color3.fromRGB(80, 95, 115)
+playerListHeader.TextSize = 10
+playerListHeader.TextXAlignment = Enum.TextXAlignment.Left
+playerListHeader.Parent = camlockSec
+
+local playerScrollContainer = Instance.new("ScrollingFrame")
+playerScrollContainer.Size = UDim2.new(1, 0, 0, 100)
+playerScrollContainer.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+playerScrollContainer.BorderSizePixel = 0
+playerScrollContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+playerScrollContainer.ScrollBarThickness = 2
+playerScrollContainer.Parent = camlockSec
+
+local pScrollStroke = Instance.new("UIStroke")
+pScrollStroke.Color = Color3.fromRGB(210, 225, 242)
+pScrollStroke.Thickness = 1
+pScrollStroke.Parent = playerScrollContainer
+
+local playerListLayout = Instance.new("UIListLayout")
+playerListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+playerListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+playerListLayout.Parent = playerScrollContainer
+
+local refreshBtn = createButton(camlockSec, "Refresh Player List", "Action", function()
+refreshPlayerList()
+sendNotification("Player List", "Refreshed")
+end)
+
+local function refreshPlayerList()
+for _, child in ipairs(playerScrollContainer:GetChildren()) do
+if child:IsA("TextButton") then
+child:Destroy()
+end
+end
+
+local autoBtn = Instance.new("TextButton")
+autoBtn.Size = UDim2.new(1, 0, 0, 26)
+autoBtn.BackgroundColor3 = (cfg.camlockSelectedPlayer == nil) and Color3.fromRGB(230, 240, 250) or Color3.fromRGB(250, 252, 255)
+autoBtn.Font = Enum.Font.Code
+autoBtn.Text = " [AUTO] Closest to Cursor"
+autoBtn.TextColor3 = (cfg.camlockSelectedPlayer == nil) and Color3.fromRGB(30, 110, 195) or Color3.fromRGB(80, 95, 115)
+autoBtn.TextSize = 10
+autoBtn.TextXAlignment = Enum.TextXAlignment.Left
+autoBtn.Parent = playerScrollContainer
+
+autoBtn.MouseButton1Down:Connect(function()
+cfg.camlockSelectedPlayer = nil
+refreshPlayerList()
+sendNotification("Camlock Target", "Auto")
+end)
+
+for _, p in ipairs(Players:GetPlayers()) do
+if p ~= lp then
+local pBtn = Instance.new("TextButton")
+pBtn.Size = UDim2.new(1, 0, 0, 26)
+pBtn.BackgroundColor3 = (cfg.camlockSelectedPlayer == p) and Color3.fromRGB(230, 240, 250) or Color3.fromRGB(250, 252, 255)
+pBtn.Font = Enum.Font.Code
+pBtn.Text = " " .. p.Name .. " (" .. p.DisplayName .. ")"
+pBtn.TextColor3 = (cfg.camlockSelectedPlayer == p) and Color3.fromRGB(30, 110, 195) or Color3.fromRGB(80, 95, 115)
+pBtn.TextSize = 10
+pBtn.TextXAlignment = Enum.TextXAlignment.Left
+pBtn.Parent = playerScrollContainer
+
+pBtn.MouseButton1Down:Connect(function()
+cfg.camlockSelectedPlayer = p
+refreshPlayerList()
+sendNotification("Camlock Target", p.Name)
+end)
+end
+end
+playerScrollContainer.CanvasSize = UDim2.new(0, 0, 0, (#Players:GetPlayers()) * 26)
+end
+
+Players.PlayerAdded:Connect(function() refreshPlayerList() end)
+Players.PlayerRemoving:Connect(function() refreshPlayerList() end)
+refreshPlayerList()
+
+-- ==================== POPULATE ESP SECTION ====================
+local espToggleBtn
+espToggleBtn = createButton(espSec, "Username ESP", cfg.usernameESP and "ENABLED" or "DISABLED", function()
+cfg.usernameESP = not cfg.usernameESP
+espToggleBtn.Text = " Username ESP: " .. (cfg.usernameESP and "ENABLED" or "DISABLED")
+sendNotification("Username ESP", cfg.usernameESP)
+if not cfg.usernameESP then
+for _, bb in pairs(espBillboards) do
+if bb then bb:Destroy() end
+end
+espBillboards = {}
+end
+end)
+
+local highlightToggleBtn
+highlightToggleBtn = createButton(espSec, "Highlight Players", cfg.highlightESP and "ENABLED" or "DISABLED", function()
+cfg.highlightESP = not cfg.highlightESP
+highlightToggleBtn.Text = " Highlight Players: " .. (cfg.highlightESP and "ENABLED" or "DISABLED")
+sendNotification("Highlight Players", cfg.highlightESP)
+if not cfg.highlightESP then
+for _, hl in pairs(espHighlights) do
+if hl then hl:Destroy() end
+end
+espHighlights = {}
+end
+end)
+
+-- ESP Username Color List Dropdown
+local espColorDropdownBtn = createButton(espSec, "ESP Text Color", "[OPEN]", function() end)
+
+local espScrollContainer = Instance.new("ScrollingFrame")
+espScrollContainer.Size = UDim2.new(1, 0, 0, 150)
+espScrollContainer.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+espScrollContainer.BorderSizePixel = 0
+espScrollContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+espScrollContainer.ScrollBarThickness = 2
+espScrollContainer.Visible = false
+espScrollContainer.Parent = espSec
+
+local espScrollStroke = Instance.new("UIStroke")
+espScrollStroke.Color = Color3.fromRGB(210, 225, 242)
+espScrollStroke.Thickness = 1
+espScrollStroke.Parent = espScrollContainer
+
+local espListLayout = Instance.new("UIListLayout")
+espListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+espListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+espListLayout.Parent = espScrollContainer
+
+local globalColorsList = {
+{Name = "Pure White", Color = Color3.new(1, 1, 1)},
+{Name = "Pitch Black", Color = Color3.new(0.04, 0.04, 0.04)},
+{Name = "Midnight Gray", Color = Color3.new(0.18, 0.22, 0.28)},
+{Name = "Silver Gray", Color = Color3.new(0.75, 0.75, 0.75)},
+{Name = "Crimson Red", Color = Color3.new(0.78, 0.08, 0.08)},
+{Name = "Blood Orange", Color = Color3.new(1, 0.27, 0)},
+{Name = "Neon Orange", Color = Color3.new(1, 0.55, 0)},
+{Name = "Electric Yellow", Color = Color3.new(1, 0.9, 0)},
+{Name = "Golden Yellow", Color = Color3.new(1, 0.84, 0)},
+{Name = "Lime Green", Color = Color3.new(0.2, 0.8, 0.2)},
+{Name = "Toxic Green", Color = Color3.new(0.12, 0.86, 0.2)},
+{Name = "Emerald Green", Color = Color3.new(0, 0.59, 0.31)},
+{Name = "Mint Green", Color = Color3.new(0.6, 1, 0.6)},
+{Name = "Cyan", Color = Color3.new(0, 0.94, 1)},
+{Name = "Neon Blue", Color = Color3.new(0, 0.47, 1)},
+{Name = "Deep Navy Blue", Color = Color3.new(0, 0, 0.5)},
+{Name = "Royal Blue", Color = Color3.new(0.25, 0.41, 0.88)},
+{Name = "Sky Blue", Color = Color3.new(0.53, 0.81, 0.92)},
+{Name = "Sunset Purple", Color = Color3.new(0.59, 0.2, 0.78)},
+{Name = "Neon Magenta", Color = Color3.new(1, 0, 1)},
+{Name = "Hot Pink", Color = Color3.new(1, 0.41, 0.71)},
+{Name = "Pastel Pink", Color = Color3.new(1, 0.71, 0.76)},
+{Name = "Deep Teal", Color = Color3.new(0, 0.5, 0.5)},
+{Name = "Turquoise", Color = Color3.new(0.25, 0.88, 0.82)},
+{Name = "Chocolate Brown", Color = Color3.new(0.55, 0.27, 0.07)},
+{Name = "Warm Peach", Color = Color3.new(1, 0.85, 0.73)},
+{Name = "Lavender", Color = Color3.new(0.9, 0.9, 0.98)},
+{Name = "Rose Gold", Color = Color3.new(0.72, 0.43, 0.47)},
+{Name = "Charcoal", Color = Color3.new(0.21, 0.27, 0.31)},
+{Name = "Neon Amber", Color = Color3.new(1, 0.75, 0)}
+}
+
+for _, colorData in ipairs(globalColorsList) do
+local cBtn = Instance.new("TextButton")
+cBtn.Size = UDim2.new(1, 0, 0, 26)
+cBtn.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+cBtn.Font = Enum.Font.Code
+cBtn.Text = " • " .. colorData.Name
+cBtn.TextColor3 = Color3.fromRGB(80, 95, 115)
+cBtn.TextSize = 10
+cBtn.TextXAlignment = Enum.TextXAlignment.Left
+cBtn.Parent = espScrollContainer
+
+cBtn.MouseButton1Down:Connect(function()
+cfg.espTextColor = colorData.Color
+espColorDropdownBtn.Text = " ESP Text Color: " .. colorData.Name
+sendNotification("ESP Text Color", colorData.Name)
+end)
+end
+espScrollContainer.CanvasSize = UDim2.new(0, 0, 0, #globalColorsList * 26)
+
+local espOpen = false
+espColorDropdownBtn.MouseButton1Down:Connect(function()
+espOpen = not espOpen
+espScrollContainer.Visible = espOpen
+espColorDropdownBtn.Text = espOpen and " ESP Text Color: [CLOSE]" or " ESP Text Color: [OPEN]"
+end)
+
+-- ==================== POPULATE HBE SECTION ====================
+local hitboxToggleBtn
+hitboxToggleBtn = createButton(hbeSec, "Hitbox Expander", cfg.hitboxExpander and "ENABLED" or "DISABLED", function()
+cfg.hitboxExpander = not cfg.hitboxExpander
+hitboxToggleBtn.Text = " Hitbox Expander: " .. (cfg.hitboxExpander and "ENABLED" or "DISABLED")
+sendNotification("Hitbox Expander", cfg.hitboxExpander)
+if not cfg.hitboxExpander then
+for part, origSize in pairs(originalHitboxSizes) do
+if part and part.Parent then
+part.Size = origSize
+end
+end
+for part, origTrans in pairs(originalHitboxTransparencies) do
+if part and part.Parent then
+part.Transparency = origTrans
+end
+end
+for part, origColor in pairs(originalHitboxColors) do
+if part and part.Parent then
+part.Color = origColor
+end
+end
+originalHitboxSizes = {}
+originalHitboxTransparencies = {}
+originalHitboxColors = {}
+end
+end)
+
+createSlider(hbeSec, "Hitbox Scale", 1, 10, cfg.hitboxScale, function(val)
+cfg.hitboxScale = val
+end)
+
+createSlider(hbeSec, "Hitbox Transparency", 0, 1, cfg.hitboxTransparency, function(val)
+cfg.hitboxTransparency = val
+end)
+
+-- Hitbox Color List Dropdown
+local hitboxColorDropdownBtn = createButton(hbeSec, "Hitbox Color", "[OPEN]", function() end)
+
+local hitboxScrollContainer = Instance.new("ScrollingFrame")
+hitboxScrollContainer.Size = UDim2.new(1, 0, 0, 150)
+hitboxScrollContainer.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+hitboxScrollContainer.BorderSizePixel = 0
+hitboxScrollContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+hitboxScrollContainer.ScrollBarThickness = 2
+hitboxScrollContainer.Visible = false
+hitboxScrollContainer.Parent = hbeSec
+
+local hitboxScrollStroke = Instance.new("UIStroke")
+hitboxScrollStroke.Color = Color3.fromRGB(210, 225, 242)
+hitboxScrollStroke.Thickness = 1
+hitboxScrollStroke.Parent = hitboxScrollContainer
+
+local hitboxListLayout = Instance.new("UIListLayout")
+hitboxListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+hitboxListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+hitboxListLayout.Parent = hitboxScrollContainer
+
+for _, colorData in ipairs(globalColorsList) do
+local cBtn = Instance.new("TextButton")
+cBtn.Size = UDim2.new(1, 0, 0, 26)
+cBtn.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+cBtn.Font = Enum.Font.Code
+cBtn.Text = " • " .. colorData.Name
+cBtn.TextColor3 = Color3.fromRGB(80, 95, 115)
+cBtn.TextSize = 10
+cBtn.TextXAlignment = Enum.TextXAlignment.Left
+cBtn.Parent = hitboxScrollContainer
+
+cBtn.MouseButton1Down:Connect(function()
+cfg.hitboxColor = colorData.Color
+hitboxColorDropdownBtn.Text = " Hitbox Color: " .. colorData.Name
+sendNotification("Hitbox Color", colorData.Name)
+end)
+end
+hitboxScrollContainer.CanvasSize = UDim2.new(0, 0, 0, #globalColorsList * 26)
+
+local hitboxOpen = false
+hitboxColorDropdownBtn.MouseButton1Down:Connect(function()
+hitboxOpen = not hitboxOpen
+hitboxScrollContainer.Visible = hitboxOpen
+hitboxColorDropdownBtn.Text = hitboxOpen and " Hitbox Color: [CLOSE]" or " Hitbox Color: [OPEN]"
+end)
+
+-- ==================== POPULATE FOG SECTION ====================
+local noFogToggleBtn
+noFogToggleBtn = createButton(fogSec, "No Fog", cfg.noFog and "ENABLED" or "DISABLED", function()
+cfg.noFog = not cfg.noFog
+noFogToggleBtn.Text = " No Fog: " .. (cfg.noFog and "ENABLED" or "DISABLED")
+updateFog()
+sendNotification("No Fog", cfg.noFog)
+end)
+
+createSlider(fogSec, "Fog Distance", 0, 2000, cfg.fogDistance, function(val)
+cfg.fogDistance = val
+updateFog()
+end)
+
+local fogRainbowToggleBtn
+fogRainbowToggleBtn = createButton(fogSec, "Rainbow Fog", cfg.fogRainbow and "ENABLED" or "DISABLED", function()
+cfg.fogRainbow = not cfg.fogRainbow
+fogRainbowToggleBtn.Text = " Rainbow Fog: " .. (cfg.fogRainbow and "ENABLED" or "DISABLED")
+updateFog()
+sendNotification("Rainbow Fog", cfg.fogRainbow)
+end)
+
+-- Scrollable Dropdown List for Fog Colors in Fog Section
+local fogColorDropdownBtn = createButton(fogSec, "Fog Color List", "[OPEN]", function() end)
+
+local fogScrollContainer = Instance.new("ScrollingFrame")
+fogScrollContainer.Size = UDim2.new(1, 0, 0, 150)
+fogScrollContainer.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+fogScrollContainer.BorderSizePixel = 0
+fogScrollContainer.CanvasSize = UDim2.new(0, 0, 0, 0)
+fogScrollContainer.ScrollBarThickness = 2
+fogScrollContainer.Visible = false
+fogScrollContainer.Parent = fogSec
+
+local fogScrollStroke = Instance.new("UIStroke")
+fogScrollStroke.Color = Color3.fromRGB(210, 225, 242)
+fogScrollStroke.Thickness = 1
+fogScrollStroke.Parent = fogScrollContainer
+
+local fogListLayout = Instance.new("UIListLayout")
+fogListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+fogListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+fogListLayout.Parent = fogScrollContainer
+
+for _, colorData in ipairs(globalColorsList) do
+local cBtn = Instance.new("TextButton")
+cBtn.Size = UDim2.new(1, 0, 0, 26)
+cBtn.BackgroundColor3 = Color3.fromRGB(250, 252, 255)
+cBtn.Font = Enum.Font.Code
+cBtn.Text = " • " .. colorData.Name
+cBtn.TextColor3 = Color3.fromRGB(80, 95, 115)
+cBtn.TextSize = 10
+cBtn.TextXAlignment = Enum.TextXAlignment.Left
+cBtn.Parent = fogScrollContainer
+
+cBtn.MouseButton1Down:Connect(function()
+cfg.fogColorCustom = colorData.Color
+cfg.fogRainbow = false
+fogRainbowToggleBtn.Text = " Rainbow Fog: DISABLED"
+fogColorDropdownBtn.Text = " Fog Color List: " .. colorData.Name
+updateFog()
+sendNotification("Fog Color", colorData.Name)
+end)
+end
+fogScrollContainer.CanvasSize = UDim2.new(0, 0, 0, #globalColorsList * 26)
+
+local fogOpen = false
+fogColorDropdownBtn.MouseButton1Down:Connect(function()
+fogOpen = not fogOpen
+fogScrollContainer.Visible = fogOpen
+fogColorDropdownBtn.Text = fogOpen and " Fog Color List: [CLOSE]" or " Fog Color List: [OPEN]"
+end)
+
+-- ==================== POPULATE EXTRA SECTION ====================
+createSlider(extraSec, "Zoom Rate", 0.1, 5, cfg.zoomRate, function(val)
+cfg.zoomRate = val
+lp.CameraMaxZoomDistance = 128 * val
+lp.CameraMinZoomDistance = 0.5 * val
+end)
+
+-- Unload / Close Script Toggle in Extra Section
+createButton(extraSec, "Unload Script", "Action", function()
+scriptRunning = false
+pcall(function() fovCircle:Remove() end)
+for _, bb in pairs(espBillboards) do if bb then bb:Destroy() end end
+for _, hl in pairs(espHighlights) do if hl then hl:Destroy() end end
+for part, origSize in pairs(originalHitboxSizes) do if part and part.Parent then part.Size = origSize end end
+for part, origTrans in pairs(originalHitboxTransparencies) do if part and part.Parent then part.Transparency = origTrans end end
+for part, origColor in pairs(originalHitboxColors) do if part and part.Parent then part.Color = origColor end end
+screenGui:Destroy()
+print("💎 divine.all-in-one unloaded successfully.")
+end)
+
+-- Tab Switcher Logic with Smooth, Non-Dramatic Section Animation
+local activeTabBtn = nil
+local isAnimating = false
+
+local function switchTab(sectionName, tabBtn)
+if isAnimating or activeTabBtn == tabBtn then return end
+isAnimating = true
+
+for name, sec in pairs(sections) do
+if name ~= sectionName then
+sec.Visible = false
+end
+end
+
+local targetSec = sections[sectionName]
+targetSec.Position = UDim2.new(0.06, 0, 0, 0)
+targetSec.Visible = true
+
+local slideIn = TweenService:Create(targetSec, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Position = UDim2.new(0, 0, 0, 0)})
+slideIn:Play()
+slideIn.Completed:Connect(function()
+isAnimating = false
+end)
+
+if activeTabBtn then
+activeTabBtn.BackgroundColor3 = Color3.fromRGB(236, 241, 247)
+activeTabBtn.TextColor3 = Color3.fromRGB(80, 95, 115)
+end
+activeTabBtn = tabBtn
+tabBtn.BackgroundColor3 = Color3.fromRGB(222, 233, 245)
+tabBtn.TextColor3 = Color3.fromRGB(30, 110, 195)
+end
+
+local function createTabButton(name, displayName)
+local btn = Instance.new("TextButton")
+btn.Size = UDim2.new(1, -8, 0, 32)
+btn.BackgroundColor3 = Color3.fromRGB(236, 241, 247)
+btn.BorderSizePixel = 0
+btn.Font = Enum.Font.Code
+btn.Text = displayName
+btn.TextColor3 = Color3.fromRGB(80, 95, 115)
+btn.TextSize = 10
+btn.Parent = tabNavFrame
+
+local tabStroke = Instance.new("UIStroke")
+tabStroke.Color = Color3.fromRGB(210, 225, 242)
+tabStroke.Thickness = 1
+tabStroke.Parent = btn
+
+btn.MouseButton1Down:Connect(function()
+switchTab(name, btn)
+end)
+return btn
+end
+
+local homeTab = createTabButton("Home", "HOME")
+local silentAimTab = createTabButton("SilentAim", "AIM")
+local camlockTab = createTabButton("Camlock", "LOCK")
+local espTab = createTabButton("ESP", "ESP")
+local hbeTab = createTabButton("HBE", "HBE")
+local fogTab = createTabButton("Fog", "FOG")
+local extraTab = createTabButton("Extra", "EXTRA")
+
+-- Default to Home tab
+homeSec.Position = UDim2.new(0, 0, 0, 0)
+homeSec.Visible = true
+activeTabBtn = homeTab
+homeTab.BackgroundColor3 = Color3.fromRGB(222, 233, 245)
+homeTab.TextColor3 = Color3.fromRGB(30, 110, 195)
+
+local isMinimized = false
+minimizeBtn.MouseButton1Down:Connect(function()
+isMinimized = not isMinimized
+sectionsContainer.Visible = not isMinimized
+tabNavFrame.Visible = not isMinimized
+minimizeBtn.Text = isMinimized and "+" or "-"
+mainFrame.Size = isMinimized and UDim2.new(0, 500, 0, 42) or UDim2.new(0, 500, 0, 500)
+end)
+
+-- ==========================================================
+
+-- RenderStepped loop
+RunService.RenderStepped:Connect(function()
+if not scriptRunning then return end
+
+-- Handle Rainbow Fog Effect Smoothly
+if cfg.fogRainbow and not cfg.noFog then
+local hue = (tick() % 5) / 5
+Lighting.FogColor = Color3.fromHSV(hue, 1, 1)
+end
+
+local mousePos = UIS:GetMouseLocation()
+fovCircle.Position = mousePos
+fovCircle.Radius = cfg.silentAimFOV
+fovCircle.Visible = cfg.silentAimFOVShow
+fovCircle.Transparency = cfg.silentAimFOVOpacity
+
+if cfg.silentAim then
+silentAimCachedPart = getClosestPlayerToCursor()
+else
+silentAimCachedPart = nil
+end
+
+if cfg.hitboxExpander then
+for _, p in pairs(Players:GetPlayers()) do
+if p ~= lp and isAlive(p) then
+local char = p.Character
+local hrp = char and char:FindFirstChild("HumanoidRootPart")
+if hrp then
+if not originalHitboxSizes[hrp] then
+originalHitboxSizes[hrp] = hrp.Size
+end
+if not originalHitboxTransparencies[hrp] then
+originalHitboxTransparencies[hrp] = hrp.Transparency
+end
+if not originalHitboxColors[hrp] then
+originalHitboxColors[hrp] = hrp.Color
+end
+hrp.Size = Vector3.new(cfg.hitboxScale, cfg.hitboxScale, cfg.hitboxScale)
+hrp.Transparency = cfg.hitboxTransparency
+hrp.Color = cfg.hitboxColor
+hrp.CanCollide = false
+end
+end
+end
+end
+
+for _, p in pairs(Players:GetPlayers()) do
+if p ~= lp then
+local char = p.Character
+local head = char and char:FindFirstChild("Head")
+
+if cfg.usernameESP and isAlive(p) and head then
+if not espBillboards[p] then
+local bb = Instance.new("BillboardGui")
+bb.Name = "DivineESP"
+bb.Size = UDim2.new(0, 100, 0, 40)
+bb.StudsOffset = Vector3.new(0, 2.5, 0)
+bb.AlwaysOnTop = true
+bb.Parent = head
+
+local txt = Instance.new("TextLabel")
+txt.Size = UDim2.new(1, 0, 1, 0)
+txt.BackgroundTransparency = 1
+txt.Font = Enum.Font.Code
+txt.TextColor3 = cfg.espTextColor
+txt.TextSize = 11
+txt.TextStrokeTransparency = 0.4
+txt.Text = p.Name
+txt.Parent = bb
+
+espBillboards[p] = bb
+else
+local txt = espBillboards[p]:FindFirstChildOfClass("TextLabel")
+if txt then
+txt.TextColor3 = cfg.espTextColor
+end
+end
+else
+if espBillboards[p] then
+espBillboards[p]:Destroy()
+espBillboards[p] = nil
+end
+end
+
+if cfg.highlightESP and isAlive(p) and char then
+if not espHighlights[p] then
+local hl = Instance.new("Highlight")
+hl.Name = "DivineHighlight"
+hl.Adornee = char
+hl.FillColor = Color3.fromRGB(180, 220, 255)
+hl.OutlineColor = cfg.espTextColor
+hl.FillTransparency = 0.6
+hl.Parent = char
+
+espHighlights[p] = hl
+else
+espHighlights[p].OutlineColor = cfg.espTextColor
+end
+else
+if espHighlights[p] then
+espHighlights[p]:Destroy()
+espHighlights[p] = nil
+end
+end
+end
+end
+
+if cfg.camlockMode then
+if not camlockTarget then
+if cfg.camlockSelectedPlayer then
+if isAlive(cfg.camlockSelectedPlayer) then
+camlockTarget = getTargetPart(cfg.camlockSelectedPlayer.Character)
+else
+camlockTarget = nil
+end
+else
+camlockTarget = getClosestPlayerForCamlock()
+end
+end
+
+if camlockTarget then
+local isBehindWall = false
+if cfg.camlockWallCheck then
+isBehindWall = wallBetween(camlockTarget.Position)
+end
+
+if not isBehindWall then
+local targetPos = camlockTarget.Position
+local hrp = camlockTarget.Parent:FindFirstChild("HumanoidRootPart")
+if hrp and cfg.camlockPrediction > 0 then
+targetPos = targetPos + (hrp.Velocity * cfg.camlockPrediction)
+end
+
+local currentCFrame = cam.CFrame
+local targetCFrame = CFrame.new(currentCFrame.Position, targetPos)
+
+if cfg.hardCamlock then
+-- Hard Camlock: instant, stiff lock with zero smoothing
+cam.CFrame = targetCFrame
+else
+-- Standard Smooth Camlock
+local smoothness = math.clamp(cfg.camlockSmoothness, 1, 20)
+cam.CFrame = currentCFrame:Lerp(targetCFrame, 1 / smoothness)
+end
+end
+end
+else
+camlockTarget = nil
+end
+end)
+
+-- Keybind toggles with debounce protection
+local lastKeyToggled = 0
+UIS.InputBegan:Connect(function(input, gameProcessed)
+if not scriptRunning then return end
+if gameProcessed then return end
+if tick() - lastKeyToggled < 0.2 then return end
+
+if input.KeyCode == cfg.silentAimKey and cfg.useKeybind then
+lastKeyToggled = tick()
+cfg.silentAim = not cfg.silentAim
+silentAimToggleBtn.Text = " Silent Aim Mode: " .. (cfg.silentAim and "ENABLED" or "DISABLED")
+sendNotification("Silent Aim Mode", cfg.silentAim)
+elseif input.KeyCode == cfg.camlockKey then
+lastKeyToggled = tick()
+cfg.camlockMode = not cfg.camlockMode
+camlockToggleBtn.Text = " Camlock Mode: " .. (cfg.camlockMode and "ENABLED" or "DISABLED")
+if not cfg.camlockMode then
+camlockTarget = nil
+end
+sendNotification("Camlock Mode", cfg.camlockMode)
+elseif input.KeyCode == cfg.uiToggleKey then
+mainFrame.Visible = not mainFrame.Visible
+end
+end)
+
+-- HOOK METAMETHOD
+local mt = getrawmetatable(game)
+local oldIndex = mt.__index
+setreadonly(mt, false)
+
+mt.__index = newcclosure(function(self, key)
+if not scriptRunning then return oldIndex(self, key) end
+if not checkcaller() and self == mouse and cfg.silentAim and not isHoldingRevolver() then
+if (key == "Hit" or key == "Target" or key == "UnitRay") and silentAimCachedPart then
+if math.random(1, 100) <= cfg.silentAimHitChance then
+local origin = cam.CFrame.Position
+local targetPos = silentAimCachedPart.Position + Vector3.new(
+silentAimCachedPart.AssemblyLinearVelocity.X * cfg.silentAimPredX,
+silentAimCachedPart.AssemblyLinearVelocity.Y * cfg.silentAimPredY,
+silentAimCachedPart.AssemblyLinearVelocity.Z * cfg.silentAimPredZ
+)
+
+if key == "Hit" then
+return CFrame.new(targetPos)
+elseif key == "Target" then
+return silentAimCachedPart
+elseif key == "UnitRay" then
+return Ray.new(origin, (targetPos - origin).Unit)
+end
+end
+end
+end
+return oldIndex(self, key)
+end)
+
+setreadonly(mt, true)
+print("💎 divine.all-in-one loaded successfully! Press Right Control to toggle UI.")
